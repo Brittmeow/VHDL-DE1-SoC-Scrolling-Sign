@@ -1,0 +1,672 @@
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+USE ieee.numeric_std.all;
+
+
+entity de1_top is
+generic (
+   simulation_wide : positive := 28;    -- used for simulation to overide width
+	simulation_max  : positive := 50000000); -- used for simulaiton to oreride max value
+port
+(
+	-- 50Mhz clock, i.e. 50 Million rising edges per second
+   clock_50 :in  std_logic; 
+   -- 7 Segment Display
+	hex0     :out std_logic_vector(6 downto 0); -- right most
+	hex1     :out std_logic_vector(6 downto 0);	
+	hex2     :out std_logic_vector(6 downto 0);	
+	hex3     :out std_logic_vector(6 downto 0);	
+	hex4     :out std_logic_vector(6 downto 0);	
+	hex5     :out std_logic_vector(6 downto 0); -- left most
+   -- Red LEDs above Slider switches
+	-- drive the ledr's high to light them up
+   ledr     :out std_logic_vector(9 downto 0);
+	-- key/Push Button, push button to drive a signal low, normally high
+	key      :in  std_logic_vector(3 downto 0);  
+   -- Slider Switch, logic 0 when slide down, logic 1 when pushed towards 7 segments
+	sw       :in	 std_logic_vector(9 downto 0) 
+);
+
+end de1_top;
+
+architecture struct of de1_top is
+
+-- define signals to be used
+signal enable_pulse_every_second  : std_logic;
+signal reset                      : std_logic;
+signal one_second_count_value     : std_logic_vector(3 downto 0);
+signal ten_second_count_value     : std_logic_vector(3 downto 0);
+signal enable_10_second           : std_logic;
+signal load_counter               : std_logic;
+SIGNAL shift, dir, speed, slowcount, key1, prevkey1 : std_logic;
+SIGNAL state_out, O5, O4, O3, O2, O1, O0 : unsigned(3 downto 0);
+TYPE state_type IS (zero, one, two, three, four, five, six, seven, eight, nine);
+SIGNAL currentstate : state_type;
+SIGNAL nextstate : state_type;
+
+-- define the component
+component gen_counter is
+generic (
+		wide :positive; -- how many bits is the counter
+		max  :positive  -- what is the max count
+		);
+port (
+		clk	 :in	std_logic;
+		data	 :in  std_logic_vector(wide-1 downto 0 );
+		load	 :in  std_logic;
+		enable :in  std_logic;
+		reset	 :in  std_logic;
+		count	 :out std_logic_vector(wide-1 downto 0 );
+		term	 :out std_logic
+		);
+end component;
+	
+
+component seven_segment_cntrl IS
+	-- Begin port declaration
+	port (
+		-- Declare data input "input"
+		input : in unsigned(3 downto 0);
+		-- Declare the seven segment output
+		hex   : out std_logic_vector(6 downto 0)
+		);
+-- End entity		
+end component;
+
+
+
+
+
+begin
+-- use a name that makes sense, key(0) is our reset, push to reset
+reset <= not key(0); 
+
+
+-- first use an instance of counter to get clock enable
+-- never ever use the term output as clock, always use as an enable 
+large_counter : gen_counter
+generic map (
+		wide => simulation_wide, -- need 28 bits do divide 50Mhz down to 1 second
+		max  => simulation_max   -- terminate the count when you hit 50Million
+		)
+port map (
+		clk    => clock_50,
+		data	 => (others => '0'),
+		load	 => '0',   -- not loadable
+		enable => '1',   -- always enabled
+		reset	 => reset, 
+		count	 => open,  -- we are not using this signal
+		term	 => enable_pulse_every_second -- goes high for 1 clock cycle max value hit
+		);
+				
+one_second_counter : gen_counter 
+generic map (
+		wide => 4,  -- created a 4 bit counter (max count could be 15)
+		max  => 9   -- stop counting after 9, go back to 0
+		)
+port map (
+		clk	 => clock_50,
+		data	 => sw(3 downto 0), -- use switch for data input to preload
+		load	 => load_counter,   
+		enable => enable_pulse_every_second,
+		reset	 => reset,
+		count	 => one_second_count_value,
+		term	 => enable_10_second
+		);
+		
+
+U5: seven_segment_cntrl PORT MAP(
+	input=> O5,
+	hex=> hex5
+);
+
+U4: seven_segment_cntrl PORT MAP(
+	input=> O4,
+	hex=> hex4
+);
+
+U3: seven_segment_cntrl PORT MAP(
+	input=> O3,
+	hex=> hex3
+);
+
+U2: seven_segment_cntrl PORT MAP(
+	input=> O2,
+	hex=> hex2
+);
+
+U1: seven_segment_cntrl PORT MAP(
+	Input=> O1,
+	Hex=> hex1
+);
+
+U0: seven_segment_cntrl PORT MAP(
+	input=> O0,
+	hex=> hex0
+);
+
+
+Process(clock_50, reset)
+Begin
+	If reset='1' then
+		shift<='1';
+	Elsif rising_edge(clock_50) then
+		shift<= key(2);
+	End if;
+End process;
+
+Process(reset, clock_50)
+Begin
+	If reset='1' then
+		dir<='0';
+	Elsif rising_edge(clock_50) then
+		dir <= not key(1);
+	end if;
+End process;
+
+Process(clock_50, reset)
+Begin 
+	If reset='1' then
+		speed<='0';
+	Elsif rising_edge(clock_50) then
+		speed<=sw(0);
+	End if;
+End process;
+
+PROCESS (clock_50, reset)
+BEGIN
+	if reset = '1' THEN
+		currentstate <= zero;
+		--nextstate<=zero;
+	ELSIF rising_edge(clock_50) THEN
+	--	currentstate <= nextstate;
+		IF shift='0' then
+			currentstate<= nextstate;
+		ELSIF (enable_pulse_every_second='1' AND speed='1') THEN
+			if slowcount='0' then
+					slowcount<='1';
+			else 
+				currentstate <=nextstate;
+				slowcount<='0';
+			end if;
+		ELSIF enable_pulse_every_second='1' THEN
+				currentstate <= nextstate;
+		END IF;		
+	END IF;
+END PROCESS;
+
+	-- Create combinational process & case statement to determine next_state based on current state and inputs
+	PROCESS (currentstate, shift, dir)
+	BEGIN
+	--if reset='1' then
+		--currentstate<=zero;
+	--else
+		CASE currentstate IS
+			WHEN zero =>
+				--if reset='1' then
+			--		nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif (speed='1' AND slowcount='1') then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+				--		if dir='0' then
+			--				nextstate<=one;
+		--				else
+	--						nextstate<=nine;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=one;
+					else
+						nextstate<=nine;
+					end if;
+				end if;
+			WHEN one =>
+			--	if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+	--			elsif (speed='1' AND slowcount='1') then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+				--		if dir='0' then
+			--				nextstate<=two;
+		--				else
+	--						nextstate<=zero;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=two;
+					else
+						nextstate<=zero;
+					end if;
+				end if;
+			WHEN two =>
+			--	if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+	--			elsif (speed='1' AND slowcount='1') then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+				--		if dir='0' then
+			--				nextstate<=three;
+		--				else
+	--						nextstate<=one;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=three;
+					else
+						nextstate<=one;
+					end if;
+				end if;
+			WHEN three =>
+				--if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif (speed='1' AND slowcount='1') then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=four;
+--						else
+--							nextstate<=two;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=four;
+					else
+						nextstate<=two;
+					end if;
+				end if;
+			WHEN four =>
+			--	if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif speed='1' then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=five;
+--						else
+--							nextstate<=three;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=five;
+					else
+						nextstate<=three;
+					end if;
+				end if;
+			WHEN five =>
+		--		if reset='1' then
+			--		nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif speed='1' then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=six;
+--						else
+--							nextstate<=four;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=six;
+					else
+						nextstate<=four;
+					end if;
+				end if;
+			WHEN six =>
+			--	if reset='1' then
+			--		nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif speed='1' then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=seven;
+--						else
+--							nextstate<=five;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=seven;
+					else
+						nextstate<=five;
+					end if;
+				end if;
+			WHEN seven =>
+				--if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif speed='1' then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=eight;
+--						else
+--							nextstate<=six;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=eight;
+					else
+						nextstate<=six;
+					end if;
+				end if;
+			WHEN eight =>
+			--	if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif speed='1' then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=nine;
+--						else
+--							nextstate<=seven;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=nine;
+					else
+						nextstate<=seven;
+					end if;
+				end if;
+			WHEN nine =>
+			--	if reset='1' then
+				--	nextstate<=zero;
+				if shift='0' then
+					nextstate<=currentstate;
+--				elsif speed='1' then
+--					if slowcount='0' then
+--						nextstate<=currentstate;
+--						slowcount<='1';
+--					else 
+--						if dir='0' then
+--							nextstate<=zero;
+--						else
+--							nextstate<=eight;
+--						end if;
+--						slowcount<='0';
+--					end if;
+				else
+					if dir='0' then
+						nextstate<=zero;
+					else
+						nextstate<=eight;
+					end if;
+				end if;
+		END CASE;
+--	end if;
+	END PROCESS;
+
+mealy: PROCESS (currentstate) 
+BEGIN
+		CASE currentstate IS
+			WHEN zero =>
+	O5<="1010";
+	O4<="1010";
+	O3<="0100";
+	O2<="0101";
+	O1<="0111";
+	O0<="0000";
+			WHEN one =>
+	O5<="1111";
+	O4<="1010";
+	O3<="1010";
+	O2<="0100";
+	O1<="0101";
+	O0<="0001";
+			WHEN two =>
+	O5<="1111";
+	O4<="1111";
+	O3<="1010";
+	O2<="1010";
+	O1<="0100";
+	O0<="0010";
+			WHEN three =>
+	O5<="1111";
+	O4<="1111";
+	O3<="1111";
+	O2<="1010";
+	O1<="1010";
+	O0<="0011";
+			WHEN four =>
+	O5<="1111";
+	O4<="1111";
+	O3<="1111";
+	O2<="1111";
+	O1<="1010";
+	O0<="0100";
+			WHEN five =>
+	O5<="1111";
+	O4<="1111";
+	O3<="1111";
+	O2<="1111";
+	O1<="1111";
+	O0<="0101";
+			WHEN six =>
+	O5<="0111";
+	O4<="1111";
+	O3<="1111";
+	O2<="1111";
+	O1<="1111";
+	O0<="0110";	
+			WHEN seven =>
+	O5<="0101";
+	O4<="0111";
+	O3<="1111";
+	O2<="1111";
+	O1<="1111";
+	O0<="0111";
+			WHEN eight =>
+	O5<="0100";
+	O4<="0101";
+	O3<="0111";
+	O2<="1111";
+	O1<="1111";
+	O0<="1000";
+			WHEN nine =>
+	O5<="1010";
+	O4<="0100";
+	O3<="0101";
+	O2<="0111";
+	O1<="1111";
+	O0<="1001";	
+		END CASE;
+	-- End process
+	END PROCESS mealy;
+ 
+end; -- end the design
+
+
+
+
+
+
+
+
+--gen counter code provided by course instructor
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+USE ieee.numeric_std.all;
+
+entity gen_counter is
+-- we are using the generic construct to allow this counter to be generic.
+generic (
+		wide : positive; -- how many bits is the counter
+		max  : positive  -- what is the max value of the counter ( modulus )
+		);
+port (
+		clk	 :in  std_logic; -- system clock
+		data	 :in  std_logic_vector( wide-1 downto 0 ); -- data in for parallel load, use unsigned(data) to cast to unsigned
+		load	 :in  std_logic; -- signal to load data into i_count i_count <= unsigned(data);
+		enable :in  std_logic; -- clock enable
+		reset	 :in  std_logic; -- reset to zeros use i_count <= (others => '0' ) since size depends on generic
+		count	 :out std_logic_vector( wide-1 downto 0 ); -- count out
+		term	 :out std_logic -- maximum count is reached
+		);
+end;
+	
+architecture rtl of gen_counter is
+-- use a signal of type unsigned for counting
+signal i_count : unsigned (wide-1 downto 0); -- see how we made this generic using the generics above
+
+begin
+
+-- drive the count to the output.
+count <= std_logic_vector(i_count); -- we type cast the count back to std_logic_vector
+
+-- counter process, asynchronously clears the counter to 0's
+-- allows the count value to be preset/loaded with a value when
+-- the load signal is high, and has priority
+-- once the counter is enabled the counter will start counting until it rolls over
+-- or the max count is met. 
+counter: process(clk, reset) begin
+  if (reset='1') then -- active high reset
+	 i_count <= (others => '0'); -- set counter to 0's
+	 term    <= '0';  -- want the terminal count off on reset
+  elsif (rising_edge(clk)) then
+    term <='0';
+    if (load = '1') then  -- load takes priority
+	 	   i_count <= unsigned(data);
+    elsif (enable = '1') then -- if enabled the counter is running.
+	   if (i_count=max) then -- the max value is hit, synchronously set to '0's
+		  term <='1'; -- we only want this active for 1 clock cycle
+	     i_count<=(others=>'0');
+	   else -- increment the counter
+		  term <= '0'; -- disable to term count, so only high for 1 clock cycle
+	     i_count <= i_count + 1;
+      end if; 
+    end if;
+   end if;
+end process;
+end;
+				
+		
+
+
+--***********************************************************************************
+--                                                                                  *
+--                  Copyright (C) 2014 Altera Corporation                           *
+--                                                                                  *
+-- ALTERA, ARRIA, CYCLONE, HARDCOPY, MAX, MEGACORE, NIOS, QUARTUS & STRATIX         *
+-- are Reg. U.S. Pat. & Tm. Off. and Altera marks in and outside the U.S.           *
+--                                                                                  *
+-- All information provided herein is provided on an "as is" basis,                 *
+-- without warranty of any kind.                                                    *
+--                                                                                  *
+-- Module Name: seven_segment_cntrl         File Name: seven_segment_cntrl.vhd      *
+--                                                                                  *
+-- Module Function: This file implements control logic for the 7-segment display    *
+--                                                                                  *
+-- REVISION HISTORY:                                                                *
+--***********************************************************************************
+
+-- Insert library and use clauses
+LIBRARY IEEE;
+USE IEEE.STD_LOGIC_1164.ALL;
+USE IEEE.NUMERIC_STD.ALL;
+
+-- Begin entity declaration for "seven_segment_cntrl"
+ENTITY seven_segment_cntrl IS
+	-- Begin port declaration
+	PORT (
+		-- Declare data input "input"
+		input : IN UNSIGNED(3 DOWNTO 0);
+		
+		-- Declare the seven segment output
+		hex : OUT STD_LOGIC_VECTOR(6 downto 0)
+	);
+-- End entity		
+END ENTITY seven_segment_cntrl;
+
+-- Begin architecture
+ARCHITECTURE logic OF seven_segment_cntrl IS
+signal seven_seg : std_logic_vector (6 downto 0);  -- upper bit is seg_a, lower bit is seg_g
+BEGIN
+    hex(6 downto 0) <= not seven_seg(0) & not seven_seg(1) & not seven_seg(2)&
+	                    not seven_seg(3) & not seven_seg(4) & not seven_seg(5)& 
+							  not seven_seg(6);
+							  
+	-- Begin process sensitive to input
+	PROCESS (input)
+	BEGIN
+		--  Case statement to control segments of seven segment display
+		--  logic 1 should up the segment
+		CASE input IS
+			WHEN  "0000" =>  -- 7-segment display reads '0' when input equals "0000"
+			  seven_seg <= "1111110"; 
+			WHEN  "0001" =>  -- 7-segment display reads '1' when input equals "0001"
+			  seven_seg <= "0110000"; 
+			WHEN  "0010" =>  -- 7-segment display reads '2' when input equals "0010"
+			  seven_seg <= "1101101"; 
+			WHEN  "0011" =>  -- 7-segment display reads '3' when input equals "0011"
+			  seven_seg <= "1111001"; 
+			WHEN  "0100" =>  -- 7-segment display reads '4' when input equals "0100"
+			  seven_seg <= "0110011";
+			WHEN  "0101" =>  -- 7-segment display reads '5' when input equals "0101"
+			  seven_seg <= "1011011";
+			WHEN  "0110" =>  -- 7-segment display reads '6' when input equals "0110"
+			  seven_seg <= "1011111";
+		    WHEN  "0111" =>  -- 7-segment display reads '7' when input equals "0111"
+			  seven_seg <= "1110000";
+		    WHEN  "1000" =>  -- 7-segment display reads '8' when input equals "1000"
+			  seven_seg <= "1111111";
+		    WHEN  "1001" =>  -- 7-segment display reads '9' when input equals "1001"
+			  seven_seg <= "1111011";
+			  WHEN "1111" =>  --7 seg display is off when input = "1111"
+				seven_seg <= "0000000";
+			WHEN OTHERS =>  -- 7-segment display reads 'E' for error when input equals any other bit pattern
+			  seven_seg <= "1001111";
+		END CASE;
+	-- End process
+	END PROCESS;
+-- End architecture
+END ARCHITECTURE logic;
